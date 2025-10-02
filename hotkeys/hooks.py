@@ -4,7 +4,9 @@ app_publisher = "Paul"
 app_description = "hotkeys"
 app_email = "paul@paul.com"
 app_license = "mit"
-
+app_include_js = [
+    "/assets/hotkeys/js/hotkeys.js"
+]
 # Apps
 # ------------------
 
@@ -26,7 +28,7 @@ app_license = "mit"
 
 # include js, css files in header of desk.html
 # app_include_css = "/assets/hotkeys/css/hotkeys.css"
-# app_include_js = "/assets/hotkeys/js/hotkeys.js"
+#  app_include_js = "/assets/hotkeys/js/hotkeys.js"
 
 # include js, css files in header of web template
 # web_include_css = "/assets/hotkeys/css/hotkeys.css"
@@ -241,4 +243,3 @@ app_license = "mit"
 # default_log_clearing_doctypes = {
 # 	"Logging DocType Name": 30  # days to retain logs
 # }
-
