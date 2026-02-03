@@ -1,0 +1,125 @@
+# hotkeys/hotkeys/page/ai_chat/ai_chat.py
+
+import frappe
+import requests
+import json
+
+@frappe.whitelist(allow_guest=False)
+def send_to_n8n(message):
+    """
+    Send user message to n8n webhook and return AI response.
+    
+    Args:
+        message (str): User's chat message
+        
+    Returns:
+        dict: Response with status and reply
+    """
+    try:
+        # Validate input
+        if not message or not message.strip():
+            return {
+                "status": "error", 
+                "reply": "Please enter a message"
+            }
+        
+        # n8n webhook URL - PRODUCTION URL (workflow must be activated)
+        webhook_url = "http://localhost:5678/webhook/d82a8cf7-9418-4708-99a7-74dddc2710c4/chat"
+        
+        # Prepare payload
+        payload = {
+            "message": message.strip(),
+            "user": frappe.session.user,
+            "timestamp": frappe.utils.now_datetime().isoformat(),
+            "session_id": frappe.session.sid
+        }
+        
+        # Send request to n8n
+        response = requests.post(
+            webhook_url,
+            json=payload,
+            headers={
+                "Content-Type": "application/json",
+                "User-Agent": "ERPNext-AI-Chat/1.0"
+            },
+            timeout=30
+        )
+        
+        # Check for HTTP errors
+        response.raise_for_status()
+        
+        # Parse response
+        try:
+            data = response.json()
+            # Support multiple response formats
+            reply = (
+                data.get("reply") or 
+                data.get("text") or 
+                data.get("message") or 
+                data.get("response") or
+                str(data)
+            )
+        except json.JSONDecodeError:
+            # Fallback to plain text
+            reply = response.text.strip() or "Received empty response from AI"
+        
+        return {
+            "status": "success", 
+            "reply": reply
+        }
+    
+    except requests.exceptions.Timeout:
+        error_msg = "The AI is taking too long to respond. Please try again."
+        frappe.log_error("n8n webhook timeout", "AI Chat Webhook")
+        return {
+            "status": "error", 
+            "reply": error_msg
+        }
+    
+    except requests.exceptions.ConnectionError:
+        error_msg = "Cannot connect to AI service. Please check if n8n is running."
+        frappe.log_error("Cannot reach n8n webhook", "AI Chat Webhook")
+        return {
+            "status": "error", 
+            "reply": error_msg
+        }
+    
+    except requests.exceptions.HTTPError as e:
+        error_msg = f"AI service returned an error (HTTP {e.response.status_code})"
+        frappe.log_error(f"n8n HTTP error: {str(e)}", "AI Chat Webhook")
+        return {
+            "status": "error", 
+            "reply": error_msg
+        }
+    
+    except requests.exceptions.RequestException as e:
+        error_msg = "Network error while connecting to AI service"
+        frappe.log_error(f"Request exception: {str(e)}", "AI Chat Webhook")
+        return {
+            "status": "error", 
+            "reply": error_msg
+        }
+    
+    except Exception as e:
+        error_msg = "An unexpected error occurred. Please check the Error Log."
+        frappe.log_error(f"Unexpected error in AI chat: {str(e)}", "AI Chat")
+        return {
+            "status": "error", 
+            "reply": error_msg
+        }
+
+
+@frappe.whitelist(allow_guest=False)
+def get_chat_history(limit=50):
+    """
+    Optional: Retrieve recent chat history for the current user.
+    You can implement this if you want to store chat history in ERPNext.
+    
+    Args:
+        limit (int): Number of messages to retrieve
+        
+    Returns:
+        list: Chat history
+    """
+    # This is a placeholder - implement if needed
+    return []

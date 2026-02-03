@@ -7,72 +7,76 @@ from datetime import datetime
 
 def execute(filters=None):
     columns = get_columns()
-    data = get_data(filters)
+    data = get_data(filters or {})
     return columns, data
 
 def get_columns():
     return [
         {
-            "label": _("Posting Date"),
+            "label": _("التاريخ"),
             "fieldname": "posting_date",
             "fieldtype": "Date",
-            "width": 150
+            "width": 120
         },
         {
-            "label": _("Description"),
+            "label": _("الوصف"),
             "fieldname": "description",
             "fieldtype": "Data",
             "width": 300
         },
         {
-            "label": _("Rate"),
+            "label": _("السعر"),
             "fieldname": "rate",
-            "fieldtype": "Currency",
-            "width": 100
+            "fieldtype": "float",
+            "precision": 2,
+            "width": 70
         },
         {
-            "label": _("Quantity"),
+            "label": _("العدد"),
             "fieldname": "quantity",
-            "fieldtype": "Float",
-            "width": 100
+            "fieldtype": "float",
+            "precision": 2,
+            "width": 70
         },
         {
-            "label": _("Amount"),
+            "label": _("ا.الضرب"),
             "fieldname": "amount",
-            "fieldtype": "Currency",
-            "width": 150
+            "fieldtype": "float",
+            "precision": 2,
+            "width": 80
         },
         {
-            "label": _("Total"),
+            "label": _("الاجمالى"),
             "fieldname": "total",
-            "fieldtype": "Currency",
-            "width": 150
+            "fieldtype": "float",
+            "precision": 2,
+            "width": 90
         }
     ]
 
 def get_data(filters):
-    if not filters.get("party"):
+    party = filters.get("party")
+    if not party:
         frappe.throw(_("Please select Party"))
 
-    party = filters.get("party")
-    days = flt(filters.get("days")) or 7
+    days = flt(filters.get("days")) or 999  # Increased default for broader history
     to_date = getdate(nowdate())
     from_date = getdate(add_days(to_date, -days))
     company = filters.get("company") or frappe.db.get_single_value("Global Defaults", "default_company")
     party_type = filters.get("party_type") or "Customer"
 
-    # Get the default Accounts Receivable account
+    # Get the default Accounts Receivable account (consider multi-currency later if needed)
     account = frappe.db.get_value("Company", company, "default_receivable_account")
     if not account:
         frappe.throw(_("Default Accounts Receivable account not set for company {0}").format(company))
 
-    # Calculate opening balance
+    # Calculate opening balance (matches standard report: sum prior debits - credits)
     opening_balance = get_balance_on(account, from_date, party_type=party_type, party=party)
 
-    # Fetch GL Entries
+    # Fetch ALL GL Entries for party/account/date (no voucher type limit)
     gl_entries = get_gl_entries(filters, account, from_date, to_date)
 
-    # Consolidate GL Entries
+    # Consolidate (group by date/voucher, like standard)
     consolidated_gle = consolidate_entries(gl_entries)
 
     data = []
@@ -88,47 +92,28 @@ def get_data(filters):
         "posting_date": None
     })
 
-    # Process consolidated GL Entries
+    # Process GL Entries (handle all voucher types)
     for entry in consolidated_gle:
         raw_date = entry["posting_date"]
         dt_object = get_datetime(raw_date)
         post_date = getdate(dt_object)
 
+        # Full GL impact (debit - credit); no allocation adjustment
         amount = flt(entry["debit"] - entry["credit"])
 
-        # Validate Payment Entry allocations
-        if entry["voucher_type"] == "Payment Entry":
-            allocated_amount = frappe.db.sql("""
-                SELECT SUM(allocated_amount) as total
-                FROM `tabPayment Entry Reference`
-                WHERE parent = %s
-                AND docstatus = 1
-            """, entry["voucher_no"])[0][0] or 0.0
-            custom_information = frappe.db.get_value("Payment Entry", entry["voucher_no"], "custom_information") or ""
-            if abs(flt(amount) + flt(allocated_amount)) > 0.01:
-                amount = -allocated_amount if allocated_amount else amount
-
-        # If Sales Invoice, fetch item details
-        if entry["voucher_type"] == "Sales Invoice":
-            invoice_total = frappe.db.sql("""
-                SELECT SUM(amount) as total
-                FROM `tabSales Invoice Item`
-                WHERE parent = %s
-                AND docstatus = 1
-            """, entry["voucher_no"])[0][0] or 0.0
-            if abs(flt(amount) - flt(invoice_total)) > 0.01:
-                amount = invoice_total
-
+        description = ""
+        if entry.get("voucher_type") == "Sales Invoice":
+            # Add item details
             items = frappe.db.sql("""
                 SELECT item_name, item_code, rate, qty, amount
                 FROM `tabSales Invoice Item`
-                WHERE parent = %s
-                AND docstatus = 1
+                WHERE parent = %s AND docstatus = 1
                 ORDER BY idx
-            """, entry["voucher_no"], as_dict=True)
+            """, (entry.get("voucher_no"),), as_dict=True)
+
             for item in items:
                 data.append({
-                    "description": f'<a href="/app/item/{item.item_code}">{item.item_name}</a>',
+                    "description": f'{item.item_name}',
                     "rate": flt(item.rate),
                     "quantity": flt(item.qty),
                     "amount": flt(item.amount),
@@ -136,31 +121,45 @@ def get_data(filters):
                     "posting_date": post_date
                 })
 
-        # Add Invoice or Payment row
-        if entry["voucher_type"] == "Payment Entry":
-            description = f'<a href="/app/payment-entry/{entry["voucher_no"]}">نقداً يوم {post_date} {custom_information}</a>'
-        else:
-            description = f'<a href="/app/sales-invoice/{entry["voucher_no"]}">فاتوره يوم {post_date}</a>'
-        
-        data.append({
-            "description": description,
-            "rate": None,
-            "quantity": None,
-            "amount": None,
-            "total": amount,
-            "posting_date": post_date
-        })
+            description = f'فاتوره يوم {post_date}'
 
-        running_balance += amount
-        # Add balance row
-        data.append({
-            "description": _("الاجمالى"),
-            "rate": None,
-            "quantity": None,
-            "amount": None,
-            "total": running_balance,
-            "posting_date": post_date
-        })
+        elif entry.get("voucher_type") == "Payment Entry":
+            mode_of_payment = frappe.db.get_value("Payment Entry", entry.get("voucher_no"), "mode_of_payment") or _("غير محدد")
+            custom_information = frappe.db.get_value("Payment Entry", entry.get("voucher_no"), "custom_information") or ""
+            description = f'{mode_of_payment} تنزيل {post_date} {custom_information}'
+
+        elif entry.get("voucher_type") == "Journal Entry":
+            # Use remark or fallback
+            user_remark = frappe.db.get_value("Journal Entry", entry.get("voucher_no"), "user_remark") or ""
+            description = f'Journal Entry: {user_remark}' if user_remark else f'Journal Entry on {post_date}'
+
+        else:
+            # Fallback for other types (e.g., Sales Return)
+            description = f'{entry.get("voucher_type")} on {post_date}'
+
+        # Add transaction row if amount != 0
+        if amount != 0:
+            data.append({
+                "description": description,
+                "rate": None,
+                "quantity": None,
+                "amount": None,
+                "total": amount,  # Show transaction impact here
+                "posting_date": post_date
+            })
+
+            # Update running balance (cumulative, like standard report)
+            running_balance += amount
+
+            # Add subtotal row
+            data.append({
+                "description": _("الاجمالى"),
+                "rate": None,
+                "quantity": None,
+                "amount": None,
+                "total": running_balance,
+                "posting_date": post_date
+            })
 
     return data
 
@@ -187,26 +186,11 @@ def get_balance_on(account, date, party_type=None, party=None):
 
 def get_gl_entries(filters, account, from_date, to_date):
     conditions, condition_values = get_conditions(filters, account)
-    query_values = [filters.get("party_type"), filters.get("party"), account, from_date, to_date] + condition_values
 
-    # Pre-filter valid voucher_nos
-    valid_vouchers = frappe.db.sql("""
-        SELECT name
-        FROM `tabPayment Entry`
-        WHERE docstatus = 1 AND payment_type = 'Receive'
-        AND posting_date BETWEEN %s AND %s
-        UNION
-        SELECT name
-        FROM `tabSales Invoice`
-        WHERE docstatus = 1
-        AND posting_date BETWEEN %s AND %s
-    """, (from_date, to_date, from_date, to_date), as_dict=True)
+    values = [filters.get("party_type"), filters.get("party"), account, from_date, to_date] + condition_values
 
-    voucher_nos = [v.name for v in valid_vouchers]
-    if not voucher_nos:
-        return []
-
-    gl_entries = frappe.db.sql("""
+    # Fetch ALL vouchers for party/account/date (no valid_vouchers limit)
+    query = """
         SELECT
             g.posting_date, g.voucher_type, g.voucher_no,
             SUM(g.debit) as debit, SUM(g.credit) as credit, MIN(g.creation) as creation
@@ -216,12 +200,12 @@ def get_gl_entries(filters, account, from_date, to_date):
         AND g.account = %s
         AND g.posting_date BETWEEN %s AND %s
         AND g.is_cancelled = 0
-        AND g.voucher_no IN %s
         {0}
         GROUP BY g.posting_date, g.voucher_type, g.voucher_no
-        ORDER BY g.posting_date, g.creation
-    """.format("AND " + conditions if conditions else ""), query_values + [tuple(voucher_nos)], as_dict=True)
+        ORDER BY g.posting_date, creation
+    """.format("AND " + conditions if conditions else "")
 
+    gl_entries = frappe.db.sql(query, values, as_dict=True)
     return gl_entries
 
 def consolidate_entries(gl_entries):
@@ -243,7 +227,7 @@ def get_conditions(filters, account):
     conditions = []
     values = []
 
-    # Exclude specific journal entries
+    # Exclude specific journal entries (as in your original)
     err_journals = frappe.db.get_all(
         "Journal Entry",
         filters={
@@ -255,8 +239,9 @@ def get_conditions(filters, account):
         as_list=True,
     )
     if err_journals:
-        conditions.append("g.voucher_no not in ({})".format(",".join(["%s"] * len(err_journals))))
-        values.extend([x[0] for x in err_journals])
+        err_names = [x[0] for x in err_journals]
+        conditions.append("g.voucher_no not in ({})".format(",".join(["%s"] * len(err_names))))
+        values.extend(err_names)
 
     system_generated_cr_dr_journals = frappe.db.get_all(
         "Journal Entry",
@@ -270,7 +255,8 @@ def get_conditions(filters, account):
         as_list=True,
     )
     if system_generated_cr_dr_journals:
-        conditions.append("g.voucher_no not in ({})".format(",".join(["%s"] * len(system_generated_cr_dr_journals))))
-        values.extend([x[0] for x in system_generated_cr_dr_journals])
+        sys_names = [x[0] for x in system_generated_cr_dr_journals]
+        conditions.append("g.voucher_no not in ({})".format(",".join(["%s"] * len(sys_names))))
+        values.extend(sys_names)
 
     return " AND ".join(conditions), values
