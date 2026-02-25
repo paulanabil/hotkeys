@@ -14,12 +14,21 @@ app_include_js = [
 doc_events = {
     "Delivery Note": {
         "on_submit": "hotkeys.hotkeys.report.customer_item_delivery.customer_item_delivery.trigger_refresh",
-        "on_cancel": "hotkeys.hotkeys.report.customer_item_delivery.customer_item_delivery.trigger_refresh",
-        "on_update": "hotkeys.hotkeys.report.customer_item_delivery.customer_item_delivery.trigger_refresh",
-        "after_insert": "hotkeys.hotkeys.report.customer_item_delivery.customer_item_delivery.trigger_refresh"
+        "on_update_after_submit": "hotkeys.hotkeys.report.customer_item_delivery.customer_item_delivery.trigger_refresh",
+        "before_update_after_submit": "hotkeys.hotkeys.report.customer_item_delivery.customer_item_delivery.trigger_refresh",
+        "on_cancel": "hotkeys.hotkeys.report.customer_item_delivery.customer_item_delivery.trigger_refresh"
     },
     "Payment Entry": {
         "on_submit": "hotkeys.hotkeys.report.customer_item_delivery.customer_item_delivery.trigger_refresh",
+        "on_update_after_submit": "hotkeys.hotkeys.report.customer_item_delivery.customer_item_delivery.trigger_refresh",
         "on_cancel": "hotkeys.hotkeys.report.customer_item_delivery.customer_item_delivery.trigger_refresh"
+    },
+    "GL Entry": {
+        "after_insert": "hotkeys.hotkeys.report.customer_item_delivery.customer_item_delivery.trigger_refresh",
+        "on_update": "hotkeys.hotkeys.report.customer_item_delivery.customer_item_delivery.trigger_refresh"
     }
 }
+fixtures = [
+    {"dt": "Custom Field", "filters": [["dt", "in", ["Sales Invoice"]]]},
+    {"dt": "DocType", "filters": [["name", "in", ["Sales Invoice Purchase Item"]]]},
+]

@@ -8,6 +8,7 @@ from datetime import datetime
 def execute(filters=None):
     columns = get_columns()
     data = get_data(filters or {})
+    
     return columns, data
 
 def get_columns():
@@ -57,7 +58,7 @@ def get_columns():
 def get_data(filters):
     party = filters.get("party")
     if not party:
-        frappe.throw(_("Please select Party"))
+        return []
 
     days = flt(filters.get("days")) or 999  # Increased default for broader history
     to_date = getdate(nowdate())
@@ -84,12 +85,12 @@ def get_data(filters):
 
     # Add opening balance row
     data.append({
-        "description": _("Opening Balance"),
+        "posting_date": None,
+        "description": _("ما قبله"),
         "rate": None,
         "quantity": None,
         "amount": None,
-        "total": running_balance,
-        "posting_date": None
+        "total": running_balance
     })
 
     # Process GL Entries (handle all voucher types)
@@ -113,18 +114,21 @@ def get_data(filters):
 
             for item in items:
                 data.append({
+                    "posting_date": post_date,
                     "description": f'{item.item_name}',
                     "rate": flt(item.rate),
                     "quantity": flt(item.qty),
                     "amount": flt(item.amount),
-                    "total": None,
-                    "posting_date": post_date
+                    "total": None
                 })
 
             description = f'فاتوره يوم {post_date}'
 
         elif entry.get("voucher_type") == "Payment Entry":
             mode_of_payment = frappe.db.get_value("Payment Entry", entry.get("voucher_no"), "mode_of_payment") or _("غير محدد")
+            # Replace "Cash" with Arabic equivalent
+            if mode_of_payment == "Cash":
+                mode_of_payment = "كاش نقداً"
             custom_information = frappe.db.get_value("Payment Entry", entry.get("voucher_no"), "custom_information") or ""
             description = f'{mode_of_payment} تنزيل {post_date} {custom_information}'
 
@@ -140,12 +144,12 @@ def get_data(filters):
         # Add transaction row if amount != 0
         if amount != 0:
             data.append({
+                "posting_date": post_date,
                 "description": description,
                 "rate": None,
                 "quantity": None,
                 "amount": None,
-                "total": amount,  # Show transaction impact here
-                "posting_date": post_date
+                "total": amount  # Show transaction impact here
             })
 
             # Update running balance (cumulative, like standard report)
@@ -153,12 +157,12 @@ def get_data(filters):
 
             # Add subtotal row
             data.append({
+                "posting_date": post_date,
                 "description": _("الاجمالى"),
                 "rate": None,
                 "quantity": None,
                 "amount": None,
-                "total": running_balance,
-                "posting_date": post_date
+                "total": running_balance
             })
 
     return data

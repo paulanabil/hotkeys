@@ -1,8 +1,101 @@
 import frappe
-from frappe.utils import today, cint, fmt_money, slug
+from frappe.utils import today, cint, fmt_money, slug, nowdate
+
+@frappe.whitelist()
+def get_delivery_note_items_for_customer(customer):
+    """Get all delivery note items for a customer that are ready to be billed
+    Handles: returns, credit notes, partial billing, and sales orders"""
+    
+    # Get all delivery note items
+    items = frappe.db.sql("""
+        SELECT 
+            dni.item_code,
+            dni.item_name,
+            dni.description,
+            dni.qty,
+            dni.stock_qty,
+            dni.uom,
+            dni.stock_uom,
+            dni.conversion_factor,
+            dni.rate,
+            dni.amount,
+            dni.warehouse,
+            dni.item_group,
+            dni.brand,
+            dn.name as delivery_note,
+            dni.name as dn_detail,
+            dni.custom_validated,
+            COALESCE(dni.billed_amt, 0) as billed_amt,
+            dni.amount as total_amount,
+            dni.so_detail,
+            dni.against_sales_order,
+            COALESCE(
+                (SELECT SUM(sii.qty)
+                 FROM `tabSales Invoice Item` sii
+                 INNER JOIN `tabSales Invoice` si ON si.name = sii.parent
+                 WHERE sii.dn_detail = dni.name
+                   AND si.docstatus = 1
+                   AND si.is_return = 0),
+                0
+            ) as billed_qty,
+            COALESCE(
+                (SELECT SUM(ABS(rdni.qty))
+                 FROM `tabDelivery Note Item` rdni
+                 INNER JOIN `tabDelivery Note` rdn ON rdn.name = rdni.parent
+                 WHERE rdni.dn_detail = dni.name
+                   AND rdn.docstatus = 1
+                   AND rdn.is_return = 1),
+                0
+            ) as returned_qty,
+            COALESCE(
+                (SELECT SUM(ABS(sii.qty))
+                 FROM `tabSales Invoice Item` sii
+                 INNER JOIN `tabSales Invoice` si ON si.name = sii.parent
+                 WHERE sii.dn_detail = dni.name
+                   AND si.docstatus = 1
+                   AND si.is_return = 1),
+                0
+            ) as credit_note_qty
+        FROM `tabDelivery Note Item` dni
+        INNER JOIN `tabDelivery Note` dn ON dn.name = dni.parent
+        WHERE dn.customer = %s
+            AND dn.docstatus = 1
+            AND dn.is_return = 0
+            AND dn.status IN ('To Bill', 'Completed')
+        ORDER BY dn.posting_date, dn.creation, dni.idx
+    """, (customer,), as_dict=1)
+    
+    # Filter out fully billed/returned items and adjust quantities
+    unbilled_items = []
+    
+    for item in items:
+        # Calculate pending quantity
+        net_deliverable_qty = item.qty - item.returned_qty - item.credit_note_qty
+        pending_qty = net_deliverable_qty - item.billed_qty
+        
+        # Check if amount is fully billed
+        billed_amt = item.billed_amt or 0
+        total_amt = item.total_amount or 0
+        pending_amount = total_amt - billed_amt
+        
+        # Only include if there's pending quantity
+        if pending_qty > 0.001:
+            # Adjust the quantity to only the unbilled amount
+            item.qty = pending_qty
+            item.stock_qty = pending_qty * (item.conversion_factor or 1)
+            item.amount = pending_qty * item.rate
+            
+            # If billed_amt tracking is used and there's a discrepancy, use the pending amount
+            if total_amt > 0 and pending_amount > 0 and pending_amount < item.amount:
+                item.amount = pending_amount
+            
+            unbilled_items.append(item)
+    
+    return unbilled_items
 
 def execute(filters=None):
-    today_date = today()
+    # Use nowdate() which respects system timezone settings
+    today_date = nowdate()
 
     company = frappe.get_cached_value("Global Defaults", None, "default_company") or frappe.db.get_single_value("Global Defaults", "default_company")
     if not company:
@@ -12,6 +105,7 @@ def execute(filters=None):
     columns = [
         {"label": "تم التسجيل", "fieldname": "registered", "fieldtype": "Check", "width": 40},
         {"label": "الزبون", "fieldname": "customer", "fieldtype": "Link", "options": "Customer", "width": 120},
+        {"label": "فاتورة", "fieldname": "create_invoice", "fieldtype": "Data", "width": 80},
         {"label": "اسم البند", "fieldname": "item_name", "fieldtype": "Data", "width": 300},
         {"label": "العدد", "fieldname": "qty", "fieldtype": "Data", "width": 60},
         {"label": "تأكيد", "fieldname": "custom_validated", "fieldtype": "Check", "width": 40},
@@ -25,7 +119,7 @@ def execute(filters=None):
     ]
 
     # Define the modes
-    modes = ["بنك مصر", "بوسطه", "فودافون كاش بولا 01006131346", "فودافون كاش المحل 01020202513"]
+    modes = ["بنك مصر", "بوسطه", "فودافون كاش بولا 01006131346", "فودافون كاش المحل 01020202513", "فودافون كاش بولا 01055757330", "Cash"]
     mode_slugs = [slug(mode) for mode in modes]
     mode_accounts = {}
     mode_balances = {}
@@ -48,7 +142,7 @@ def execute(filters=None):
             mode_balances[mode] = 0.0
 
         # Add columns for each mode - simplified labels
-        columns.append({"label": mode, "fieldname": f"party_{slug(mode)}", "fieldtype": "Data", "width": 150})
+        columns.append({"label": mode, "fieldname": f"party_{slug(mode)}", "fieldtype": "Data", "width": 200})
         columns.append({"label": mode, "fieldname": f"amount_{slug(mode)}", "fieldtype": "Currency", "width": 130})
         columns.append({"label": mode, "fieldname": f"confirm_{slug(mode)}", "fieldtype": "Check", "width": 40})
 
@@ -111,37 +205,65 @@ def execute(filters=None):
 
         gl_rows.append(gle)
 
-    # Fetch Payment Entries for each mode today - organize by mode
+    # Fetch Payment Entry details for each mode
     pe_by_mode = {mode: [] for mode in modes}
     
     for mode in modes:
+        # Get last 12 Payment Entries for this mode
         pes = frappe.db.sql("""
             SELECT
                 pe.name AS voucher_no,
                 pe.party,
-                cust.customer_name AS party_name,
+                COALESCE(cust.customer_name, pe.party) AS party_name,
                 pe.received_amount AS amount,
                 pe.mode_of_payment,
-                pe.custom_تم_التأكيد_من_الخزنه AS confirmed
+                pe.custom_تم_التأكيد_من_الخزنه AS confirmed,
+                pe.posting_date,
+                pe.creation,
+                pe.payment_type
             FROM `tabPayment Entry` pe
-            LEFT JOIN `tabCustomer` cust ON cust.name = pe.party
+            LEFT JOIN `tabCustomer` cust ON cust.name = pe.party AND pe.party_type = 'Customer'
             WHERE pe.mode_of_payment = %(mode)s
-              AND pe.posting_date = %(today)s
               AND pe.docstatus = 1
-              AND pe.payment_type = 'Receive'
-              AND pe.party_type = 'Customer'
-              AND pe.company = %(company)s
-            ORDER BY pe.creation
-        """, {"mode": mode, "today": today_date, "company": company}, as_dict=True)
+            ORDER BY pe.posting_date DESC, pe.creation DESC
+            LIMIT 12
+        """, {"mode": mode}, as_dict=True)
+        
+        # Reverse to show oldest to newest
+        pes.reverse()
 
+        
         for pe in pes:
+            # Calculate time ago from posting_date
+            from datetime import datetime
+            from frappe.utils import get_datetime, now_datetime
+            
+            posting_datetime = get_datetime(pe.posting_date)
+            now = now_datetime()
+            diff = now - posting_datetime
+            
+            days = diff.days
+            hours = diff.seconds // 3600
+            
+            if days > 0:
+                time_ago = f"{days} يوم"
+            elif hours > 0:
+                time_ago = f"{hours} ساعه"
+            else:
+                time_ago = "الآن"
+            
+            party_with_time = f"{pe.party_name} ({time_ago})"
+            
             pe_by_mode[mode].append({
                 "voucher_no": pe.voucher_no,
-                "party_name": pe.party_name or pe.party,
+                "party_name": party_with_time,
                 "amount": pe.amount,
                 "mode": mode,
-                "confirmed": cint(pe.confirmed or 0)
+                "confirmed": cint(pe.confirmed or 0),
+                "payment_type": pe.payment_type
             })
+    
+    
 
     final_data = []
 
@@ -166,6 +288,8 @@ def execute(filters=None):
             row[f"party_{slug_mode}"] = None
             row[f"amount_{slug_mode}"] = None
             row[f"confirm_{slug_mode}"] = 0
+            row[f"voucher_no_{slug_mode}"] = None
+            row[f"payment_type_{slug_mode}"] = None
         
         final_data.append(row)
 
@@ -217,11 +341,13 @@ def execute(filters=None):
                 combined_row[f"amount_{slug_mode}"] = pe_row["amount"]
                 combined_row[f"confirm_{slug_mode}"] = pe_row["confirmed"]
                 combined_row[f"voucher_no_{slug_mode}"] = pe_row["voucher_no"]
+                combined_row[f"payment_type_{slug_mode}"] = pe_row["payment_type"]
             else:
                 combined_row[f"party_{slug_mode}"] = None
                 combined_row[f"amount_{slug_mode}"] = None
                 combined_row[f"confirm_{slug_mode}"] = 0
                 combined_row[f"voucher_no_{slug_mode}"] = None
+                combined_row[f"payment_type_{slug_mode}"] = None
         
         final_data.append(combined_row)
 
@@ -241,5 +367,32 @@ def execute(filters=None):
     return columns, final_data
 
 def trigger_refresh(doc, method):
-    if doc.doctype == "Payment Entry" and doc.payment_type == "Receive" and doc.party_type == "Customer":
-        frappe.publish_realtime("customer_item_delivery_update")
+    """Trigger report refresh on relevant document changes"""
+    try:
+        should_refresh = False
+        
+        # Payment Entry - trigger for any Receive from Customer (including cancelled)
+        if doc.doctype == "Payment Entry":
+            if hasattr(doc, 'payment_type') and hasattr(doc, 'party_type'):
+                if doc.payment_type == "Receive" and doc.party_type == "Customer":
+                    should_refresh = True
+        
+        # Delivery Note - trigger for any change (including cancellation)
+        # The SQL query filters by docstatus=1, so cancelled ones won't show
+        elif doc.doctype == "Delivery Note":
+            should_refresh = True
+            # Debug logging
+            frappe.logger().info(f"Delivery Note trigger fired: {doc.name}, status: {doc.status}, method: {method}")
+        
+        # GL Entry - only for Cash account entries
+        elif doc.doctype == "GL Entry":
+            if hasattr(doc, 'account') and hasattr(doc, 'is_cancelled'):
+                if doc.account == "Cash - EMP" and doc.is_cancelled == 0:
+                    should_refresh = True
+        
+        if should_refresh:
+            frappe.publish_realtime("customer_item_delivery_update")
+            frappe.logger().info(f"Published realtime update for {doc.doctype}: {doc.name}")
+    except Exception as e:
+        # Log error but don't break the document save
+        frappe.log_error(f"Error in customer_item_delivery trigger_refresh: {str(e)}")
