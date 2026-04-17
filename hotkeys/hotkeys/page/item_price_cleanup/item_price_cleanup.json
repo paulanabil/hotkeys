@@ -1,0 +1,19 @@
+{
+ "content": null,
+ "creation": "2026-03-18 23:21:58.257293",
+ "docstatus": 0,
+ "doctype": "Page",
+ "idx": 0,
+ "modified": "2026-03-18 23:21:58.257293",
+ "modified_by": "Administrator",
+ "module": "hotkeys",
+ "name": "item_price_cleanup",
+ "owner": "Administrator",
+ "page_name": "item_price_cleanup",
+ "roles": [],
+ "script": null,
+ "standard": "Yes",
+ "style": null,
+ "system_page": 0,
+ "title": "item price cleanup"
+}

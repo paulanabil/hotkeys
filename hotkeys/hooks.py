@@ -7,7 +7,8 @@ app_license = "mit"
 
 app_include_js = [
     "/assets/hotkeys/js/hotkeys.js",
-    "/assets/hotkeys/js/arabic_duration_fix.js"
+    "/assets/hotkeys/js/route_workspace_pin.js?v=2",
+    "/assets/hotkeys/js/arabic_translate_fix.js",
 ]
 
 # 🔔 Realtime trigger when related documents are updated
@@ -28,6 +29,7 @@ doc_events = {
         "on_update": "hotkeys.hotkeys.report.customer_item_delivery.customer_item_delivery.trigger_refresh"
     }
 }
+
 fixtures = [
     {"dt": "Custom Field", "filters": [["dt", "in", ["Sales Invoice"]]]},
     {"dt": "DocType", "filters": [["name", "in", ["Sales Invoice Purchase Item"]]]},
